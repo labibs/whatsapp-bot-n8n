@@ -1,85 +1,106 @@
+// modules/whatsapp.js
 const {
     default: makeWASocket,
     useMultiFileAuthState,
     fetchLatestBaileysVersion,
     DisconnectReason
 } = require('@whiskeysockets/baileys');
-const qrcode = require('qrcode-terminal');
+
+const qrcodeTerminal = require('qrcode-terminal');
+const QRCode = require('qrcode');
 const axios = require('axios');
-const { Boom } = require('@hapi/boom');
 require('dotenv').config();
 
-let sockGlobal = null;
+let sock = null;
 
-async function startSock() {
-    const { state, saveCreds } = await useMultiFileAuthState('auth');
-    const { version } = await fetchLatestBaileysVersion();
+async function initializeWhatsApp() {
+    try {
+        const { state, saveCreds } = await useMultiFileAuthState('auth');
+        const { version } = await fetchLatestBaileysVersion();
 
-    const sock = makeWASocket({
-        version,
-        auth: state
-    });
+        sock = makeWASocket({
+            version,
+            auth: state
+        });
 
-    sockGlobal = sock;
+        sock.ev.on('creds.update', saveCreds);
+        sock.ev.on('connection.update', (update) => handleConnectionUpdate(update, initializeWhatsApp));
+        sock.ev.on('messages.upsert', handleIncomingMessages);
 
-    sock.ev.on('creds.update', saveCreds);
-
-    sock.ev.on('connection.update', (update) => {
-        console.log('💡 Connection update:', update);
-        const { connection, lastDisconnect, qr } = update;
-        
-        if (qr) qrcode.generate(qr, { small: true });
-
-        if (connection === 'open') {
-            console.log('✅ WhatsApp connected!');
-        }
-
-        if (connection === 'close') {
-            const reason = lastDisconnect?.error?.output?.statusCode;
-            console.log('🔌 Disconnected:', reason);
-            if (reason !== DisconnectReason.loggedOut) {
-                setTimeout(startSock, 3000); // retry connect
-            }
-        }
-    });
-
-    sock.ev.on('messages.upsert', async ({ messages }) => {
-        const msg = messages[0];
-        if (!msg.message || msg.key.fromMe) return;
-
-        const from = msg.key.remoteJid;
-        const isGroup = from.endsWith('@g.us');
-        const text = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
-
-        if (from === 'status@broadcast') return;
-
-        if (isGroup) {
-            console.log('📣 Pesan dari grup:', from);
-        } else {
-            console.log('📩 Pesan pribadi dari:', from);
-
-            try {
-                await axios.post(process.env.N8N_WEBHOOK_URL, {
-                    from,
-                    text,
-                    timestamp: new Date().toISOString()
-                });
-            } catch (err) {
-                console.error('❌ Gagal kirim ke n8n:', err.message);
-            }
-        }
-    });
+    } catch (error) {
+        console.error('❌ Gagal inisialisasi WhatsApp:', error.message);
+        setTimeout(initializeWhatsApp, 5000);
+    }
 }
 
-// Digunakan untuk kirim pesan WA dari luar
+async function handleConnectionUpdate(update, reconnectCallback) {
+    const { connection, lastDisconnect, qr } = update;
+    console.log('💡 Connection update:', connection);
+
+    if (qr) {
+        try {
+            // Tampilkan QR di terminal
+            qrcodeTerminal.generate(qr, { small: true });
+
+            // Simpan QR ke file .png
+            await QRCode.toFile('qr.png', qr);
+            console.log('✅ QR disimpan ke qr.png');
+        } catch (err) {
+            console.error('❌ Gagal membuat QR PNG:', err.message);
+        }
+    }
+
+    if (connection === 'open') {
+        console.log('✅ WhatsApp connected!');
+    }
+
+    if (connection === 'close') {
+        const reason = lastDisconnect?.error?.output?.statusCode;
+        console.log('🔌 Disconnected:', reason);
+
+        if (reason !== DisconnectReason.loggedOut) {
+            console.log('🔁 Reconnecting...');
+            setTimeout(reconnectCallback, 3000);
+        }
+    }
+}
+
+async function handleIncomingMessages({ messages }) {
+    const msg = messages[0];
+    if (!msg.message || msg.key.fromMe) return;
+
+    const from = msg.key.remoteJid;
+    const isGroup = from.endsWith('@g.us');
+    const text = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
+
+    if (from === 'status@broadcast') return;
+
+    if (isGroup) {
+        console.log(`📣 Grup: ${from}`);
+    } else {
+        console.log(`📩 Pribadi dari: ${from}`);
+
+        try {
+            await axios.post(process.env.N8N_WEBHOOK_URL, {
+                from,
+                text,
+                timestamp: new Date().toISOString()
+            });
+        } catch (err) {
+            console.error('❌ Gagal kirim ke n8n:', err.message);
+        }
+    }
+}
+
 async function sendWhatsAppMessage(number, message) {
-    if (!sockGlobal) throw new Error('WhatsApp not connected');
+    if (!sock) throw new Error('❌ WhatsApp not connected');
     const jid = number + '@s.whatsapp.net';
-    await sockGlobal.sendMessage(jid, { text: message });
+
+    await sock.sendMessage(jid, { text: message });
     return { to: number, status: 'success' };
 }
 
 module.exports = {
-    startSock,
+    initializeWhatsApp,
     sendWhatsAppMessage
 };
