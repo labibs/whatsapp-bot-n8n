@@ -5,22 +5,30 @@ const { normalizeNumber } = require('./helpers');
 const app = express();
 app.use(express.json());
 
+// Helper function to send message safely
+async function safeSendWhatsApp(number, message, label = 'user') {
+    try {
+        const normalized = normalizeNumber(number);
+        console.log(`📤 Sending message to ${label}: ${normalized} | ${message}`);
+        const result = await sendWhatsAppMessage(normalized, message);
+        console.log(`✅ Message sent to ${label}:`, result);
+        return { to: normalized, status: 'sent', ...result };
+    } catch (err) {
+        console.error(`❌ Failed to send to ${label}:`, err.message);
+        return { to: number, status: 'error', message: err.message };
+    }
+}
+
 app.post('/send-wa', async (req, res) => {
     const { number, number_atasan, message } = req.body;
     const results = [];
 
-    try {
-        if (number) results.push(await sendWhatsAppMessage(normalizeNumber(number), message));
-    } catch (err) {
-        console.error('❌ Kirim ke user gagal:', err.message);
-        results.push({ to: number, status: 'error', message: err.message });
+    if (number) {
+        results.push(await safeSendWhatsApp(number, message, 'user'));
     }
 
-    try {
-        if (number_atasan) results.push(await sendWhatsAppMessage(normalizeNumber(number_atasan), message));
-    } catch (err) {
-        console.error('❌ Kirim ke atasan gagal:', err.message);
-        results.push({ to: number_atasan, status: 'error', message: err.message });
+    if (number_atasan) {
+        results.push(await safeSendWhatsApp(number_atasan, message, 'atasan'));
     }
 
     res.send({ status: 'done', results });
